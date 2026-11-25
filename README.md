@@ -1,3 +1,6 @@
+Note: Shared as-is for personal workflows; not actively maintained.
+
+
 # tterminal
 
 `tterminal` is a persistent terminal service for coding agents. It exposes an MCP stdio server that talks to a local Unix-socket daemon. Sessions, output streams, rendered screens, and waiters are owned by the daemon, so long-running commands, background processes, serial devices, and tmux panes survive beyond a single shell invocation.

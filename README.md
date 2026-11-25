@@ -10,8 +10,6 @@ The default backend is a native Linux PTY. Serial and tmux are explicit alternat
 go build -o tterminal ./cmd/tterminal
 ```
 
-A release binary is also checked in at `./tterminal`.
-
 ## MCP client setup
 
 Point your MCP client at the binary with the `mcp` subcommand:

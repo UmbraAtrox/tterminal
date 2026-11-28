@@ -11,18 +11,27 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/uatx/tterminal/internal/backend"
+	"github.com/uatx/tterminal/internal/buffer"
+	"github.com/uatx/tterminal/internal/config"
 	"github.com/uatx/tterminal/internal/screen"
 	"github.com/uatx/tterminal/internal/session"
 	"github.com/uatx/tterminal/internal/types"
 )
 
 type openIn struct {
-	Backend types.BackendKind `json:"backend" jsonschema:"backend to create: pty, serial, or tmux"`
-	PTY     openPTYIn         `json:"pty,omitempty" jsonschema:"native PTY options"`
-	Serial  openSerialIn      `json:"serial,omitempty" jsonschema:"serial port options"`
-	Tmux    openTmuxIn        `json:"tmux,omitempty" jsonschema:"tmux backend options"`
-	Cols    int               `json:"cols,omitempty" jsonschema:"terminal columns"`
-	Rows    int               `json:"rows,omitempty" jsonschema:"terminal rows"`
+	Backend      types.BackendKind `json:"backend" jsonschema:"backend to create: pty, serial, or tmux"`
+	PTY          openPTYIn         `json:"pty,omitempty" jsonschema:"native PTY options"`
+	Serial       openSerialIn      `json:"serial,omitempty" jsonschema:"serial port options"`
+	Tmux         openTmuxIn        `json:"tmux,omitempty" jsonschema:"tmux backend options"`
+	Cols         int               `json:"cols,omitempty" jsonschema:"terminal columns"`
+	Rows         int               `json:"rows,omitempty" jsonschema:"terminal rows"`
+	OutputPolicy openOutputPolicy  `json:"output_policy,omitempty" jsonschema:"default output window for this session"`
+}
+
+type openOutputPolicy struct {
+	Mode     string `json:"mode,omitempty" jsonschema:"tail, delta, or all"`
+	MaxBytes int    `json:"max_bytes,omitempty" jsonschema:"maximum bytes for tail output"`
+	MaxLines int    `json:"max_lines,omitempty" jsonschema:"maximum lines for tail output"`
 }
 
 type openPTYIn struct {
@@ -83,23 +92,35 @@ type writeOut struct {
 	Cursor       int64  `json:"cursor"`
 }
 
+type outputAccounting struct {
+	RangeStartCursor int64  `json:"range_start_cursor"`
+	Cursor           int64  `json:"cursor"`
+	NextCursor       int64  `json:"next_cursor"`
+	BaseCursor       int64  `json:"base_cursor"`
+	AvailableBytes   int64  `json:"available_bytes"`
+	SkippedBytes     int64  `json:"skipped_bytes"`
+	RingDroppedBytes int64  `json:"ring_dropped_bytes"`
+	Truncated        bool   `json:"truncated"`
+	TruncationReason string `json:"truncation_reason,omitempty"`
+}
+
 type readIn struct {
 	SessionID string `json:"session_id" jsonschema:"session identifier"`
 	Cursor    int64  `json:"cursor,omitempty" jsonschema:"byte cursor"`
-	MaxBytes  int    `json:"max_bytes,omitempty" jsonschema:"maximum bytes to return"`
+	Mode      string `json:"mode,omitempty" jsonschema:"tail, delta, or all"`
+	MaxBytes  int    `json:"max_bytes,omitempty" jsonschema:"maximum bytes for tail output"`
+	MaxLines  int    `json:"max_lines,omitempty" jsonschema:"maximum lines for tail output"`
 	Format    string `json:"format,omitempty" jsonschema:"raw, text, hex, screen, or both"`
 	Encoding  string `json:"encoding,omitempty" jsonschema:"utf8, base64, or hex"`
 	WaitMS    int    `json:"wait_ms,omitempty" jsonschema:"wait up to this many milliseconds for data"`
 }
 
 type readOut struct {
-	SessionID  string           `json:"session_id"`
-	Cursor     int64            `json:"cursor"`
-	NextCursor int64            `json:"next_cursor"`
-	Data       string           `json:"data,omitempty"`
-	Encoding   string           `json:"encoding,omitempty"`
-	Screen     *screen.Snapshot `json:"screen,omitempty"`
-	Truncated  bool             `json:"truncated"`
+	SessionID string           `json:"session_id"`
+	Data      string           `json:"data,omitempty"`
+	Encoding  string           `json:"encoding,omitempty"`
+	Screen    *screen.Snapshot `json:"screen,omitempty"`
+	outputAccounting
 }
 
 type waitIn struct {
@@ -109,44 +130,47 @@ type waitIn struct {
 	QuietMS   int    `json:"quiet_ms,omitempty" jsonschema:"quiet period in milliseconds"`
 	MarkerID  string `json:"marker_id,omitempty" jsonschema:"marker identifier for until=marker"`
 	Cursor    int64  `json:"cursor,omitempty" jsonschema:"byte cursor"`
+	Mode      string `json:"mode,omitempty" jsonschema:"tail, delta, or all"`
 	TimeoutMS int    `json:"timeout_ms,omitempty" jsonschema:"timeout in milliseconds"`
-	MaxBytes  int    `json:"max_bytes,omitempty" jsonschema:"maximum bytes to return"`
+	MaxBytes  int    `json:"max_bytes,omitempty" jsonschema:"maximum bytes for tail output"`
+	MaxLines  int    `json:"max_lines,omitempty" jsonschema:"maximum lines for tail output"`
 	Format    string `json:"format,omitempty" jsonschema:"raw, text, hex, screen, or both"`
 	Encoding  string `json:"encoding,omitempty" jsonschema:"utf8, base64, or hex"`
 }
 
 type waitOut struct {
-	SessionID  string           `json:"session_id"`
-	Reason     string           `json:"reason"`
-	TimedOut   bool             `json:"timed_out"`
-	Cursor     int64            `json:"cursor"`
-	NextCursor int64            `json:"next_cursor"`
-	Data       string           `json:"data,omitempty"`
-	Encoding   string           `json:"encoding,omitempty"`
-	Screen     *screen.Snapshot `json:"screen,omitempty"`
-	Matches    []string         `json:"matches,omitempty"`
-	Exit       types.ExitStatus `json:"exit,omitempty"`
+	SessionID string           `json:"session_id"`
+	Reason    string           `json:"reason"`
+	TimedOut  bool             `json:"timed_out"`
+	Data      string           `json:"data,omitempty"`
+	Encoding  string           `json:"encoding,omitempty"`
+	Screen    *screen.Snapshot `json:"screen,omitempty"`
+	Matches   []string         `json:"matches,omitempty"`
+	Exit      types.ExitStatus `json:"exit,omitempty"`
+	outputAccounting
 }
 
 type execIn struct {
 	SessionID string `json:"session_id" jsonschema:"session identifier"`
 	Command   string `json:"command" jsonschema:"shell command to execute in the session"`
+	Cursor    int64  `json:"cursor,omitempty" jsonschema:"byte cursor for delta output"`
+	Mode      string `json:"mode,omitempty" jsonschema:"tail, delta, or all"`
 	TimeoutMS int    `json:"timeout_ms,omitempty" jsonschema:"timeout in milliseconds"`
-	MaxBytes  int    `json:"max_bytes,omitempty" jsonschema:"maximum bytes to return"`
+	MaxBytes  int    `json:"max_bytes,omitempty" jsonschema:"maximum bytes for tail output"`
+	MaxLines  int    `json:"max_lines,omitempty" jsonschema:"maximum lines for tail output"`
 	Format    string `json:"format,omitempty" jsonschema:"raw, text, hex, screen, or both"`
 	Encoding  string `json:"encoding,omitempty" jsonschema:"utf8, base64, or hex"`
 }
 
 type execOut struct {
-	SessionID  string           `json:"session_id"`
-	ID         string           `json:"id"`
-	Exit       types.ExitStatus `json:"exit"`
-	TimedOut   bool             `json:"timed_out"`
-	Cursor     int64            `json:"cursor"`
-	NextCursor int64            `json:"next_cursor"`
-	Data       string           `json:"data,omitempty"`
-	Encoding   string           `json:"encoding,omitempty"`
-	Screen     *screen.Snapshot `json:"screen,omitempty"`
+	SessionID string           `json:"session_id"`
+	ID        string           `json:"id"`
+	Exit      types.ExitStatus `json:"exit"`
+	TimedOut  bool             `json:"timed_out"`
+	Data      string           `json:"data,omitempty"`
+	Encoding  string           `json:"encoding,omitempty"`
+	Screen    *screen.Snapshot `json:"screen,omitempty"`
+	outputAccounting
 }
 
 type screenOut struct {
@@ -271,6 +295,24 @@ func asInt(value any) (int, bool) {
 	}
 }
 
+func accountFor(window buffer.WindowResult) outputAccounting {
+	return outputAccounting{
+		RangeStartCursor: window.RangeStart,
+		Cursor:           window.Cursor,
+		NextCursor:       window.Next,
+		BaseCursor:       window.Base,
+		AvailableBytes:   window.AvailableBytes,
+		SkippedBytes:     window.SkippedBytes,
+		RingDroppedBytes: window.RingDroppedBytes,
+		Truncated:        window.Truncated,
+		TruncationReason: window.TruncationReason,
+	}
+}
+
+func screenSnapshot(target *session.Session, cfg *config.Config) screen.Snapshot {
+	return target.Screen().SnapshotCapped(cfg.Limits.MaxScreenChars)
+}
+
 func (s *Server) termOpen(ctx context.Context, req *mcp.CallToolRequest, in openIn) (*mcp.CallToolResult, openOut, error) {
 	identity, err := s.requireRole(req, types.RoleWriter)
 	if err != nil {
@@ -291,6 +333,11 @@ func (s *Server) termOpen(ctx context.Context, req *mcp.CallToolRequest, in open
 		Backend: in.Backend,
 		Cols:    in.Cols,
 		Rows:    in.Rows,
+		OutputPolicy: session.OutputPolicy{
+			Mode:     in.OutputPolicy.Mode,
+			MaxBytes: in.OutputPolicy.MaxBytes,
+			MaxLines: in.OutputPolicy.MaxLines,
+		},
 		PTY: session.PTYOpen{
 			Argv: in.PTY.Argv, Shell: in.PTY.Shell, Cwd: in.PTY.Cwd, Env: in.PTY.Env,
 			Term: in.PTY.Term, Login: in.PTY.Login, ShellIntegration: integration,
@@ -343,27 +390,49 @@ func (s *Server) termRead(ctx context.Context, req *mcp.CallToolRequest, in read
 	if err != nil {
 		return nil, readOut{}, err
 	}
+	requested := in.Cursor
+	if requested <= 0 {
+		base, _ := target.Ring().Range()
+		requested = base
+	}
 	if in.WaitMS > 0 {
-		waitResult, err := target.Wait(ctx, session.WaitRequest{Until: "data", Cursor: in.Cursor, TimeoutMS: in.WaitMS, MaxBytes: in.MaxBytes})
+		waitResult, err := target.Wait(ctx, session.WaitRequest{Until: "data", Cursor: requested, TimeoutMS: in.WaitMS, MaxBytes: s.cfg.Limits.MaxRingBytes})
 		if err != nil {
 			return nil, readOut{}, err
 		}
 		if waitResult.TimedOut {
-			_, next := target.Ring().Range()
-			return nil, readOut{SessionID: in.SessionID, Cursor: in.Cursor, NextCursor: next, Truncated: true}, nil
+			base, next := target.Ring().Range()
+			retained := requested
+			if retained < base {
+				retained = base
+			}
+			if retained > next {
+				retained = next
+			}
+			dropped := base - requested
+			if dropped < 0 {
+				dropped = 0
+			}
+			return nil, readOut{
+				SessionID: in.SessionID,
+				outputAccounting: outputAccounting{
+					RangeStartCursor: requested, Cursor: retained, NextCursor: next, BaseCursor: base,
+					AvailableBytes: next - retained, RingDroppedBytes: dropped, Truncated: dropped > 0,
+				},
+			}, nil
 		}
 	}
-	if in.MaxBytes <= 0 {
-		in.MaxBytes = s.cfg.Limits.MaxChunkBytes
+	window, err := target.Window(requested, 0, in.Mode, in.MaxBytes, in.MaxLines)
+	if err != nil {
+		return nil, readOut{}, err
 	}
-	readResult := target.Ring().Read(in.Cursor, in.MaxBytes)
-	formatted, encoding := formatData(readResult.Data, in.Format, in.Encoding)
+	formatted, encoding := formatData(window.Data, in.Format, in.Encoding)
 	out := readOut{
-		SessionID: in.SessionID, Cursor: readResult.Cursor, NextCursor: readResult.Next,
-		Data: formatted, Encoding: encoding, Truncated: readResult.Truncated,
+		SessionID: in.SessionID, Data: formatted, Encoding: encoding,
+		outputAccounting: accountFor(window),
 	}
 	if strings.EqualFold(in.Format, "screen") || strings.EqualFold(in.Format, "both") {
-		snapshot := target.Screen().Snapshot()
+		snapshot := screenSnapshot(target, s.cfg)
 		out.Screen = &snapshot
 	}
 	return nil, out, nil
@@ -374,21 +443,30 @@ func (s *Server) termWait(ctx context.Context, req *mcp.CallToolRequest, in wait
 	if err != nil {
 		return nil, waitOut{}, err
 	}
+	requested := in.Cursor
+	if requested <= 0 {
+		base, _ := target.Ring().Range()
+		requested = base
+	}
 	result, err := target.Wait(ctx, session.WaitRequest{
 		Until: in.Until, Pattern: in.Pattern, QuietMS: in.QuietMS, MarkerID: in.MarkerID,
-		Cursor: in.Cursor, TimeoutMS: in.TimeoutMS, MaxBytes: in.MaxBytes,
+		Cursor: requested, TimeoutMS: in.TimeoutMS, MaxBytes: s.cfg.Limits.MaxRingBytes,
 	})
 	if err != nil {
 		return nil, waitOut{}, err
 	}
-	formatted, encoding := formatData(result.Data, in.Format, in.Encoding)
+	window, err := target.Window(result.RangeStart, result.NextCursor, in.Mode, in.MaxBytes, in.MaxLines)
+	if err != nil {
+		return nil, waitOut{}, err
+	}
+	formatted, encoding := formatData(window.Data, in.Format, in.Encoding)
 	out := waitOut{
 		SessionID: in.SessionID, Reason: result.Reason, TimedOut: result.TimedOut,
-		Cursor: in.Cursor, NextCursor: result.NextCursor, Data: formatted, Encoding: encoding,
-		Matches: result.Matches, Exit: result.Exit,
+		Data: formatted, Encoding: encoding, Matches: result.Matches, Exit: result.Exit,
+		outputAccounting: accountFor(window),
 	}
 	if strings.EqualFold(in.Format, "screen") || strings.EqualFold(in.Format, "both") {
-		snapshot := target.Screen().Snapshot()
+		snapshot := screenSnapshot(target, s.cfg)
 		out.Screen = &snapshot
 	}
 	return nil, out, nil
@@ -399,26 +477,25 @@ func (s *Server) termExec(ctx context.Context, req *mcp.CallToolRequest, in exec
 	if err != nil {
 		return nil, execOut{}, err
 	}
-	if in.MaxBytes <= 0 {
-		in.MaxBytes = s.cfg.Limits.MaxChunkBytes
-	}
 	result, err := target.Exec(ctx, in.Command, in.TimeoutMS)
 	if err != nil {
 		return nil, execOut{}, err
 	}
-	end := result.NextCursor
-	maxBytes := in.MaxBytes
-	if end > result.Cursor && end-result.Cursor < int64(maxBytes) {
-		maxBytes = int(end - result.Cursor)
+	requested := result.RangeStart
+	if in.Cursor > 0 {
+		requested = in.Cursor
 	}
-	data := target.Ring().Read(result.Cursor, maxBytes).Data
-	formatted, encoding := formatData(data, in.Format, in.Encoding)
+	window, err := target.Window(requested, result.NextCursor, in.Mode, in.MaxBytes, in.MaxLines)
+	if err != nil {
+		return nil, execOut{}, err
+	}
+	formatted, encoding := formatData(window.Data, in.Format, in.Encoding)
 	out := execOut{
 		SessionID: in.SessionID, ID: result.ID, Exit: result.Exit, TimedOut: result.TimedOut,
-		Cursor: result.Cursor, NextCursor: result.NextCursor, Data: formatted, Encoding: encoding,
+		Data: formatted, Encoding: encoding, outputAccounting: accountFor(window),
 	}
 	if strings.EqualFold(in.Format, "screen") || strings.EqualFold(in.Format, "both") {
-		snapshot := target.Screen().Snapshot()
+		snapshot := screenSnapshot(target, s.cfg)
 		out.Screen = &snapshot
 	}
 	return nil, out, nil
@@ -433,7 +510,7 @@ func (s *Server) termScreen(ctx context.Context, req *mcp.CallToolRequest, in se
 	if err != nil {
 		return nil, screenOut{}, err
 	}
-	return nil, screenOut{SessionID: in.SessionID, Info: info, Screen: target.Screen().Snapshot()}, nil
+	return nil, screenOut{SessionID: in.SessionID, Info: info, Screen: screenSnapshot(target, s.cfg)}, nil
 }
 
 func (s *Server) termSignal(ctx context.Context, req *mcp.CallToolRequest, in signalIn) (*mcp.CallToolResult, okOut, error) {

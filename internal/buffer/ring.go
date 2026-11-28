@@ -12,6 +12,27 @@ type ReadResult struct {
 	Truncated bool
 }
 
+type WindowMode string
+
+const (
+	WindowTail  WindowMode = "tail"
+	WindowDelta WindowMode = "delta"
+	WindowAll   WindowMode = "all"
+)
+
+type WindowResult struct {
+	Data             []byte
+	RangeStart       int64
+	Cursor           int64
+	Next             int64
+	Base             int64
+	AvailableBytes   int64
+	SkippedBytes     int64
+	RingDroppedBytes int64
+	Truncated        bool
+	TruncationReason string
+}
+
 type Ring struct {
 	mu      sync.Mutex
 	data    []byte
@@ -86,6 +107,127 @@ func (r *Ring) Read(cursor int64, maxBytes int) ReadResult {
 	result.Data = append([]byte(nil), r.data[start:end]...)
 	result.Next = r.base + int64(end)
 	return result
+}
+
+func (r *Ring) Limit() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.limit
+}
+
+func (r *Ring) ReadWindow(requested int64, end int64, mode WindowMode, maxBytes int, maxLines int) WindowResult {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	base := r.base
+	next := r.next
+	if end <= 0 || end > next {
+		end = next
+	}
+	if end < base {
+		end = base
+	}
+
+	rangeStart := requested
+	if rangeStart < 0 {
+		rangeStart = base
+	}
+	start := rangeStart
+	if start < base {
+		start = base
+	}
+	if start > end {
+		start = end
+	}
+
+	if mode == WindowAll {
+		start = base
+		if start > end {
+			start = end
+		}
+	}
+
+	result := WindowResult{
+		RangeStart:       rangeStart,
+		Cursor:           start,
+		Next:             end,
+		Base:             base,
+		AvailableBytes:   end - start,
+		RingDroppedBytes: max64(base-rangeStart, 0),
+	}
+
+	startIndex := int(start - base)
+	endIndex := int(end - base)
+	if startIndex < 0 {
+		startIndex = 0
+	}
+	if endIndex > len(r.data) {
+		endIndex = len(r.data)
+	}
+	if endIndex < startIndex {
+		endIndex = startIndex
+	}
+
+	if mode == WindowTail {
+		tailStart := tailStartIndex(r.data, startIndex, endIndex, maxBytes, maxLines)
+		if tailStart > startIndex {
+			result.SkippedBytes = int64(tailStart - startIndex)
+			result.Cursor = base + int64(tailStart)
+			startIndex = tailStart
+		}
+	}
+
+	result.Data = append([]byte(nil), r.data[startIndex:endIndex]...)
+	if result.SkippedBytes > 0 || result.RingDroppedBytes > 0 {
+		result.Truncated = true
+		switch {
+		case result.SkippedBytes > 0 && result.RingDroppedBytes > 0:
+			result.TruncationReason = "both"
+		case result.SkippedBytes > 0:
+			result.TruncationReason = "cap"
+		default:
+			result.TruncationReason = "ring"
+		}
+	}
+	return result
+}
+
+func tailStartIndex(data []byte, start int, end int, maxBytes int, maxLines int) int {
+	startIndex := start
+	if maxBytes > 0 && end-start > maxBytes {
+		startIndex = end - maxBytes
+		if startIndex < start {
+			startIndex = start
+		}
+	}
+	if maxLines > 0 {
+		lines := 0
+		for i := end - 1; i >= start; i-- {
+			if data[i] == '\n' {
+				lines++
+				if lines > maxLines {
+					if i+1 > startIndex {
+						startIndex = i + 1
+					}
+					break
+				}
+			}
+		}
+	}
+	if startIndex < start {
+		startIndex = start
+	}
+	if startIndex > end {
+		startIndex = end
+	}
+	return startIndex
+}
+
+func max64(a int64, b int64) int64 {
+	if a > b {
+		return a
+	}
+	return b
 }
 
 func (r *Ring) len() int {

@@ -25,15 +25,20 @@ type DaemonConfig struct {
 }
 
 type LimitsConfig struct {
-	MaxSessions   int `json:"max_sessions"`
-	MaxRingBytes  int `json:"max_ring_bytes"`
-	MaxChunkBytes int `json:"max_chunk_bytes"`
-	DefaultCols   int `json:"default_cols"`
-	DefaultRows   int `json:"default_rows"`
-	ReadTimeoutMS int `json:"read_timeout_ms"`
-	WaitTimeoutMS int `json:"wait_timeout_ms"`
-	SessionTTLMS  int `json:"session_ttl_ms"`
-	QuietPollMS   int `json:"quiet_poll_ms"`
+	MaxSessions      int `json:"max_sessions"`
+	MaxRingBytes     int `json:"max_ring_bytes"`
+	MaxChunkBytes    int `json:"max_chunk_bytes"`
+	ResponseMaxBytes int `json:"response_max_bytes"`
+	ResponseMaxLines int `json:"response_max_lines"`
+	MaxScreenChars   int `json:"max_screen_chars"`
+	MaxCols          int `json:"max_cols"`
+	MaxRows          int `json:"max_rows"`
+	DefaultCols      int `json:"default_cols"`
+	DefaultRows      int `json:"default_rows"`
+	ReadTimeoutMS    int `json:"read_timeout_ms"`
+	WaitTimeoutMS    int `json:"wait_timeout_ms"`
+	SessionTTLMS     int `json:"session_ttl_ms"`
+	QuietPollMS      int `json:"quiet_poll_ms"`
 }
 
 type SecurityConfig struct {
@@ -54,15 +59,20 @@ func Default() *Config {
 			LogLevel:   "info",
 		},
 		Limits: LimitsConfig{
-			MaxSessions:   64,
-			MaxRingBytes:  8 << 20,
-			MaxChunkBytes: 1 << 20,
-			DefaultCols:   120,
-			DefaultRows:   36,
-			ReadTimeoutMS: 1000,
-			WaitTimeoutMS: 30000,
-			SessionTTLMS:  3600000,
-			QuietPollMS:   25,
+			MaxSessions:      64,
+			MaxRingBytes:     8 << 20,
+			MaxChunkBytes:    1 << 20,
+			ResponseMaxBytes: 64 << 10,
+			ResponseMaxLines: 2000,
+			MaxScreenChars:   20000,
+			MaxCols:          400,
+			MaxRows:          200,
+			DefaultCols:      120,
+			DefaultRows:      36,
+			ReadTimeoutMS:    1000,
+			WaitTimeoutMS:    30000,
+			SessionTTLMS:     3600000,
+			QuietPollMS:      25,
 		},
 		Security: SecurityConfig{
 			DefaultRole:           "writer",
@@ -155,6 +165,15 @@ func (c *Config) Validate() error {
 	}
 	if c.Limits.MaxRingBytes <= 0 || c.Limits.MaxChunkBytes <= 0 || c.Limits.MaxSessions <= 0 {
 		return fmt.Errorf("config: limits must be positive")
+	}
+	if c.Limits.ResponseMaxBytes <= 0 || c.Limits.ResponseMaxLines <= 0 || c.Limits.MaxScreenChars <= 0 {
+		return fmt.Errorf("config: response and screen limits must be positive")
+	}
+	if c.Limits.MaxCols <= 0 || c.Limits.MaxRows <= 0 {
+		return fmt.Errorf("config: max_cols and max_rows must be positive")
+	}
+	if c.Limits.ResponseMaxBytes > c.Limits.MaxRingBytes {
+		c.Limits.ResponseMaxBytes = c.Limits.MaxRingBytes
 	}
 	return nil
 }

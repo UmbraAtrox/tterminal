@@ -1,18 +1,21 @@
 package screen
 
 import (
+	"strings"
 	"sync"
 
 	vt "github.com/unixshells/vt-go"
 )
 
 type Snapshot struct {
-	Text      string `json:"text"`
-	Cols      int    `json:"cols"`
-	Rows      int    `json:"rows"`
-	CursorX   int    `json:"cursor_x"`
-	CursorY   int    `json:"cursor_y"`
-	AltScreen bool   `json:"alt_screen"`
+	Text          string `json:"text"`
+	Cols          int    `json:"cols"`
+	Rows          int    `json:"rows"`
+	CursorX       int    `json:"cursor_x"`
+	CursorY       int    `json:"cursor_y"`
+	AltScreen     bool   `json:"alt_screen"`
+	Truncated     bool   `json:"truncated,omitempty"`
+	OriginalChars int    `json:"original_chars,omitempty"`
 }
 
 type Screen struct {
@@ -64,4 +67,24 @@ func (s *Screen) Snapshot() Snapshot {
 		CursorY:   pos.Y,
 		AltScreen: s.emu.IsAltScreen(),
 	}
+}
+
+func (s *Screen) SnapshotCapped(maxChars int) Snapshot {
+	snapshot := s.Snapshot()
+	if maxChars <= 0 {
+		return snapshot
+	}
+	runes := []rune(snapshot.Text)
+	if len(runes) <= maxChars {
+		return snapshot
+	}
+	dropped := string(runes[:len(runes)-maxChars])
+	snapshot.Text = string(runes[len(runes)-maxChars:])
+	snapshot.Truncated = true
+	snapshot.OriginalChars = len(runes)
+	snapshot.CursorY -= strings.Count(dropped, "\n")
+	if snapshot.CursorY < 0 {
+		snapshot.CursorY = 0
+	}
+	return snapshot
 }

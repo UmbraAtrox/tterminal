@@ -94,6 +94,137 @@ func TestMCPToolFlow(t *testing.T) {
 	call("term_close", map[string]any{"session_id": opened.ID})
 }
 
+func TestMCPOutputWindowModes(t *testing.T) {
+	cfg := config.Default()
+	cfg.Security.DefaultRole = "owner"
+	cfg.Limits.ResponseMaxBytes = 16
+	manager := session.NewManager(cfg)
+	defer manager.Shutdown()
+	server := NewServer(cfg, manager)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	serverTransport, clientTransport := mcp.NewInMemoryTransports()
+	serverSession, err := server.mcp.Connect(ctx, serverTransport, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer serverSession.Close()
+	client := mcp.NewClient(&mcp.Implementation{Name: "output-window-test-client", Version: "1"}, nil)
+	clientSession, err := client.Connect(ctx, clientTransport, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer clientSession.Close()
+
+	call := func(name string, args map[string]any) *mcp.CallToolResult {
+		t.Helper()
+		result, err := clientSession.CallTool(ctx, &mcp.CallToolParams{Name: name, Arguments: args})
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if result.IsError {
+			t.Fatalf("%s: %s", name, errorText(result))
+		}
+		return result
+	}
+
+	openedResult := call("term_open", map[string]any{
+		"backend": "pty",
+		"pty":     map[string]any{"argv": []string{"/bin/sh", "-i"}},
+	})
+	var opened openOut
+	decodeStructured(t, openedResult, &opened)
+
+	var tail execOut
+	decodeStructured(t, call("term_exec", map[string]any{
+		"session_id": opened.ID,
+		"command":    "printf '0123456789abcdefghijklmnopqrstuvwxyz'",
+		"timeout_ms": 3000,
+	}), &tail)
+	if len(tail.Data) > 16 || tail.SkippedBytes <= 0 || !tail.Truncated {
+		t.Fatalf("tail result = %+v", tail)
+	}
+
+	var delta execOut
+	decodeStructured(t, call("term_exec", map[string]any{
+		"session_id": opened.ID,
+		"command":    "printf 'DELTA_OK'",
+		"mode":       "delta",
+		"cursor":     tail.RangeStartCursor,
+		"timeout_ms": 3000,
+	}), &delta)
+	if !strings.Contains(delta.Data, "DELTA_OK") || delta.Truncated {
+		t.Fatalf("delta result = %+v", delta)
+	}
+
+	var all execOut
+	decodeStructured(t, call("term_exec", map[string]any{
+		"session_id": opened.ID,
+		"command":    "printf 'ALL_OK'",
+		"mode":       "all",
+		"cursor":     tail.RangeStartCursor,
+		"timeout_ms": 3000,
+	}), &all)
+	if !strings.Contains(all.Data, "0123456789abcdefghijklmnopqrstuvwxyz") || !strings.Contains(all.Data, "ALL_OK") {
+		t.Fatalf("all result = %+v", all)
+	}
+	call("term_close", map[string]any{"session_id": opened.ID})
+}
+
+func TestMCPScreenCap(t *testing.T) {
+	cfg := config.Default()
+	cfg.Security.DefaultRole = "owner"
+	cfg.Limits.MaxScreenChars = 50
+	manager := session.NewManager(cfg)
+	defer manager.Shutdown()
+	server := NewServer(cfg, manager)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	serverTransport, clientTransport := mcp.NewInMemoryTransports()
+	serverSession, err := server.mcp.Connect(ctx, serverTransport, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer serverSession.Close()
+	client := mcp.NewClient(&mcp.Implementation{Name: "screen-cap-test-client", Version: "1"}, nil)
+	clientSession, err := client.Connect(ctx, clientTransport, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer clientSession.Close()
+
+	call := func(name string, args map[string]any) *mcp.CallToolResult {
+		t.Helper()
+		result, err := clientSession.CallTool(ctx, &mcp.CallToolParams{Name: name, Arguments: args})
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if result.IsError {
+			t.Fatalf("%s: %s", name, errorText(result))
+		}
+		return result
+	}
+
+	openedResult := call("term_open", map[string]any{
+		"backend": "pty",
+		"pty":     map[string]any{"argv": []string{"/bin/sh", "-i"}},
+	})
+	var opened openOut
+	decodeStructured(t, openedResult, &opened)
+	call("term_write", map[string]any{"session_id": opened.ID, "data": strings.Repeat("X", 200) + "\r"})
+	var screenResult screenOut
+	decodeStructured(t, call("term_screen", map[string]any{"session_id": opened.ID}), &screenResult)
+	if len([]rune(screenResult.Screen.Text)) > cfg.Limits.MaxScreenChars {
+		t.Fatalf("screen chars = %d", len([]rune(screenResult.Screen.Text)))
+	}
+	if !screenResult.Screen.Truncated {
+		t.Fatal("expected truncated screen")
+	}
+	call("term_close", map[string]any{"session_id": opened.ID})
+}
+
 func decodeStructured(t *testing.T, result *mcp.CallToolResult, out any) {
 	t.Helper()
 	data, err := json.Marshal(result.StructuredContent)

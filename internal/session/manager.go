@@ -15,12 +15,13 @@ import (
 )
 
 type OpenRequest struct {
-	Backend types.BackendKind `json:"backend"`
-	PTY     PTYOpen           `json:"pty,omitempty"`
-	Serial  SerialOpen        `json:"serial,omitempty"`
-	Tmux    TmuxOpen          `json:"tmux,omitempty"`
-	Cols    int               `json:"cols"`
-	Rows    int               `json:"rows"`
+	Backend      types.BackendKind `json:"backend"`
+	PTY          PTYOpen           `json:"pty,omitempty"`
+	Serial       SerialOpen        `json:"serial,omitempty"`
+	Tmux         TmuxOpen          `json:"tmux,omitempty"`
+	Cols         int               `json:"cols"`
+	Rows         int               `json:"rows"`
+	OutputPolicy OutputPolicy      `json:"output_policy,omitempty"`
 }
 
 type PTYOpen struct {
@@ -115,6 +116,17 @@ func (m *Manager) Open(ctx context.Context, req OpenRequest) (*Session, error) {
 	if req.Rows <= 0 {
 		req.Rows = m.cfg.Limits.DefaultRows
 	}
+	if max := m.cfg.Limits.MaxCols; max > 0 && req.Cols > max {
+		req.Cols = max
+	}
+	if max := m.cfg.Limits.MaxRows; max > 0 && req.Rows > max {
+		req.Rows = max
+	}
+	switch req.OutputPolicy.Mode {
+	case "", "tail", "delta", "all":
+	default:
+		return nil, fmt.Errorf("invalid_argument: unknown output policy mode %q", req.OutputPolicy.Mode)
+	}
 
 	var b backend.ByteStreamBackend
 	meta := map[string]any{}
@@ -185,6 +197,7 @@ func (m *Manager) Open(ctx context.Context, req OpenRequest) (*Session, error) {
 	}
 
 	s := newSession(randomID(12), req.Backend, m.cfg, b, req.Cols, req.Rows, meta)
+	s.SetOutputPolicy(req.OutputPolicy)
 	if err := s.Start(ctx); err != nil {
 		return nil, err
 	}

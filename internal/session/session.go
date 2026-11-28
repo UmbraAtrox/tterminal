@@ -26,6 +26,12 @@ import (
 
 const markerPollMS = 20
 
+type OutputPolicy struct {
+	Mode     string `json:"mode"`
+	MaxBytes int    `json:"max_bytes"`
+	MaxLines int    `json:"max_lines"`
+}
+
 type Session struct {
 	id      string
 	kind    types.BackendKind
@@ -39,6 +45,7 @@ type Session struct {
 	lastDataAt   time.Time
 	cwd          string
 	meta         map[string]any
+	outputPolicy OutputPolicy
 	closed       bool
 	oscPending   []byte
 	markers      map[string]types.Marker
@@ -50,19 +57,20 @@ type Session struct {
 }
 
 type Info struct {
-	ID         string            `json:"id"`
-	Backend    types.BackendKind `json:"backend"`
-	State      string            `json:"state"`
-	PID        int               `json:"pid,omitempty"`
-	Cwd        string            `json:"cwd,omitempty"`
-	Cols       int               `json:"cols"`
-	Rows       int               `json:"rows"`
-	CreatedAt  time.Time         `json:"created_at"`
-	LastDataAt time.Time         `json:"last_data_at,omitempty"`
-	Cursor     int64             `json:"cursor"`
-	Exit       types.ExitStatus  `json:"exit"`
-	Caps       types.BackendCaps `json:"caps"`
-	Meta       map[string]any    `json:"meta,omitempty"`
+	ID           string            `json:"id"`
+	Backend      types.BackendKind `json:"backend"`
+	State        string            `json:"state"`
+	PID          int               `json:"pid,omitempty"`
+	Cwd          string            `json:"cwd,omitempty"`
+	Cols         int               `json:"cols"`
+	Rows         int               `json:"rows"`
+	CreatedAt    time.Time         `json:"created_at"`
+	LastDataAt   time.Time         `json:"last_data_at,omitempty"`
+	Cursor       int64             `json:"cursor"`
+	Exit         types.ExitStatus  `json:"exit"`
+	Caps         types.BackendCaps `json:"caps"`
+	OutputPolicy OutputPolicy      `json:"output_policy"`
+	Meta         map[string]any    `json:"meta,omitempty"`
 }
 
 type WaitRequest struct {
@@ -77,8 +85,8 @@ type WaitRequest struct {
 
 type WaitResult struct {
 	Reason     string           `json:"reason"`
+	RangeStart int64            `json:"range_start"`
 	NextCursor int64            `json:"next_cursor"`
-	Data       []byte           `json:"-"`
 	Matches    []string         `json:"matches,omitempty"`
 	Exit       types.ExitStatus `json:"exit,omitempty"`
 	TimedOut   bool             `json:"timed_out"`
@@ -87,7 +95,7 @@ type WaitResult struct {
 type ExecResult struct {
 	ID         string           `json:"id"`
 	Exit       types.ExitStatus `json:"exit"`
-	Cursor     int64            `json:"cursor"`
+	RangeStart int64            `json:"range_start"`
 	NextCursor int64            `json:"next_cursor"`
 	TimedOut   bool             `json:"timed_out"`
 }
@@ -111,6 +119,7 @@ func newSession(id string, kind types.BackendKind, cfg *config.Config, b backend
 		screen:       screen.New(cols, rows),
 		createdAt:    time.Now(),
 		meta:         meta,
+		outputPolicy: OutputPolicy{Mode: "tail", MaxBytes: cfg.Limits.ResponseMaxBytes, MaxLines: cfg.Limits.ResponseMaxLines},
 		markers:      map[string]types.Marker{},
 		markerSignal: make(chan struct{}),
 		doneCh:       make(chan struct{}),
@@ -129,6 +138,51 @@ func (s *Session) Meta(key string) (any, bool) {
 	defer s.mu.RUnlock()
 	value, ok := s.meta[key]
 	return value, ok
+}
+func (s *Session) SetOutputPolicy(policy OutputPolicy) {
+	if policy.Mode == "" {
+		policy.Mode = "tail"
+	}
+	if policy.MaxBytes <= 0 {
+		policy.MaxBytes = s.cfg.Limits.ResponseMaxBytes
+	}
+	if policy.MaxLines <= 0 {
+		policy.MaxLines = s.cfg.Limits.ResponseMaxLines
+	}
+	s.mu.Lock()
+	s.outputPolicy = policy
+	s.mu.Unlock()
+}
+func (s *Session) OutputPolicy() OutputPolicy {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.outputPolicy
+}
+func (s *Session) Window(requested int64, end int64, mode string, maxBytes int, maxLines int) (buffer.WindowResult, error) {
+	policy := s.OutputPolicy()
+	if mode == "" {
+		mode = policy.Mode
+	}
+	if mode == "" {
+		mode = "tail"
+	}
+	switch buffer.WindowMode(mode) {
+	case buffer.WindowTail, buffer.WindowDelta, buffer.WindowAll:
+	default:
+		return buffer.WindowResult{}, fmt.Errorf("invalid_argument: unknown read mode %q", mode)
+	}
+	if maxBytes <= 0 {
+		maxBytes = policy.MaxBytes
+	}
+	if maxLines <= 0 {
+		maxLines = policy.MaxLines
+	}
+	if mode == string(buffer.WindowTail) {
+		if limit := s.ring.Limit(); maxBytes <= 0 || maxBytes > limit {
+			maxBytes = limit
+		}
+	}
+	return s.ring.ReadWindow(requested, end, buffer.WindowMode(mode), maxBytes, maxLines), nil
 }
 func (s *Session) Ring() *buffer.Ring     { return s.ring }
 func (s *Session) Screen() *screen.Screen { return s.screen }
@@ -349,7 +403,7 @@ func (s *Session) Exec(ctx context.Context, command string, timeoutMS int) (Exec
 		return ExecResult{}, err
 	}
 	marker, ok := s.waitForMarker(ctx, id, "D", timeoutMS)
-	result := ExecResult{ID: id, Cursor: start, TimedOut: !ok}
+	result := ExecResult{ID: id, RangeStart: start, TimedOut: !ok}
 	if ok {
 		result.Exit = types.ExitStatus{Exited: true, Code: marker.Code}
 		result.NextCursor = marker.Cursor
@@ -446,9 +500,10 @@ func (s *Session) checkWait(req WaitRequest, regex *regexp.Regexp) (WaitResult, 
 	if start < base {
 		start = base
 	}
-	result := WaitResult{NextCursor: next}
+	result := WaitResult{RangeStart: req.Cursor, NextCursor: next}
+	scanData := []byte(nil)
 	if start <= next {
-		result.Data = s.ring.Read(start, req.MaxBytes).Data
+		scanData = s.ring.Read(start, s.cfg.Limits.MaxRingBytes).Data
 	}
 
 	switch req.Until {
@@ -468,8 +523,8 @@ func (s *Session) checkWait(req WaitRequest, regex *regexp.Regexp) (WaitResult, 
 			return result, true, nil
 		}
 	case "regex":
-		if regex != nil && len(result.Data) > 0 {
-			matches := regex.FindAllString(string(result.Data), 8)
+		if regex != nil && len(scanData) > 0 {
+			matches := regex.FindAllString(string(scanData), 8)
 			if len(matches) > 0 {
 				result.Reason = "regex"
 				result.Matches = matches
@@ -522,7 +577,7 @@ func (s *Session) Info(ctx context.Context) (Info, error) {
 	return Info{
 		ID: s.id, Backend: s.kind, State: status.State, PID: status.PID, Cwd: cwd,
 		Cols: cols, Rows: rows, CreatedAt: s.createdAt, LastDataAt: last, Cursor: cursor,
-		Exit: status.Exit, Caps: status.Caps, Meta: meta,
+		Exit: status.Exit, Caps: status.Caps, OutputPolicy: s.OutputPolicy(), Meta: meta,
 	}, nil
 }
 
@@ -532,6 +587,12 @@ func (s *Session) screenSize() (int, int) {
 }
 
 func (s *Session) Resize(cols, rows int) error {
+	if max := s.cfg.Limits.MaxCols; max > 0 && cols > max {
+		cols = max
+	}
+	if max := s.cfg.Limits.MaxRows; max > 0 && rows > max {
+		rows = max
+	}
 	if err := s.backend.Resize(cols, rows); err != nil {
 		return err
 	}

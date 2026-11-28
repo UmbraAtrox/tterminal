@@ -65,7 +65,7 @@ func TestSessionExec(t *testing.T) {
 	if result.TimedOut || result.Exit.Code != 0 {
 		t.Fatalf("exec result = %+v", result)
 	}
-	data := created.Ring().Read(result.Cursor, 4096).Data
+	data := created.Ring().Read(result.RangeStart, 4096).Data
 	if !strings.Contains(string(data), "EXEC_OK") {
 		t.Fatalf("data = %q", string(data))
 	}
